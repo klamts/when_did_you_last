@@ -1,7 +1,158 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, Shuffle, Info, ChevronRight } from 'lucide-react';
+import { Play, Shuffle, Info, ChevronRight, Mic, Square, User, Trash2 } from 'lucide-react';
 import { categories, verbDict, AUDIO_BASE_URL, type Verb, type Category } from './data';
+
+// --- Custom Hook for Recording ---
+const useRecorder = () => {
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordings, setRecordings] = useState<Record<string, string>>({});
+  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
+
+  const startRecording = useCallback(async (id: string) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // iPad/iOS compatibility: check supported mime types
+      const mimeType = MediaRecorder.isTypeSupported('audio/mp4') 
+        ? 'audio/mp4' 
+        : MediaRecorder.isTypeSupported('audio/webm') 
+          ? 'audio/webm' 
+          : '';
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorder.current = recorder;
+      audioChunks.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunks.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks.current, { type: recorder.mimeType });
+        const audioUrl = URL.createObjectURL(audioBlob);
+        setRecordings(prev => ({ ...prev, [id]: audioUrl }));
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Error accessing microphone:", err);
+      alert("Không thể truy cập microphone. Vui lòng kiểm tra quyền truy cập!");
+    }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorder.current && mediaRecorder.current.state !== 'inactive') {
+      mediaRecorder.current.stop();
+      setIsRecording(false);
+    }
+  }, []);
+
+  const deleteRecording = useCallback((id: string) => {
+    setRecordings(prev => {
+      const newRecs = { ...prev };
+      if (newRecs[id]) {
+        URL.revokeObjectURL(newRecs[id]);
+        delete newRecs[id];
+      }
+      return newRecs;
+    });
+  }, []);
+
+  return { isRecording, recordings, startRecording, stopRecording, deleteRecording };
+};
+
+const AudioControls = ({ 
+  id, 
+  modelUrl, 
+  recorder, 
+  color = "navy" 
+}: { 
+  id: string; 
+  modelUrl: string; 
+  recorder: ReturnType<typeof useRecorder>;
+  color?: string;
+}) => {
+  const { isRecording, recordings, startRecording, stopRecording, deleteRecording } = recorder;
+  const userAudioUrl = recordings[id];
+  const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
+
+  const handleToggleRecord = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isRecording && activeRecordingId === id) {
+      stopRecording();
+      setActiveRecordingId(null);
+    } else if (!isRecording) {
+      startRecording(id);
+      setActiveRecordingId(id);
+    }
+  };
+
+  const playModel = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    new Audio(modelUrl).play();
+  };
+
+  const playUser = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (userAudioUrl) new Audio(userAudioUrl).play();
+  };
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    deleteRecording(id);
+  };
+
+  const isThisRecording = isRecording && activeRecordingId === id;
+
+  return (
+    <div className="flex items-center gap-1">
+      {/* Model Play */}
+      <button 
+        onClick={playModel} 
+        className="p-1.5 hover:bg-black/5 rounded-full transition-colors"
+        title="Nghe mẫu"
+      >
+        <Play size={14} style={{ color }} />
+      </button>
+
+      {/* Record Toggle */}
+      <button 
+        onClick={handleToggleRecord} 
+        disabled={isRecording && !isThisRecording}
+        className={`p-1.5 rounded-full transition-all ${
+          isThisRecording ? 'bg-red-500 text-white animate-pulse' : 'hover:bg-black/5'
+        } ${isRecording && !isThisRecording ? 'opacity-20' : ''}`}
+        title={isThisRecording ? "Dừng ghi âm" : "Ghi âm giọng của bạn"}
+      >
+        {isThisRecording ? <Square size={14} /> : <Mic size={14} style={{ color: isThisRecording ? 'white' : color }} />}
+      </button>
+
+      {/* User Playback */}
+      {userAudioUrl && !isThisRecording && (
+        <>
+          <button 
+            onClick={playUser} 
+            className="p-1.5 hover:bg-black/5 rounded-full transition-colors"
+            title="Nghe lại giọng của bạn"
+          >
+            <User size={14} style={{ color }} />
+          </button>
+          <button 
+            onClick={handleDelete} 
+            className="p-1.5 hover:bg-black/5 rounded-full transition-colors opacity-40 hover:opacity-100"
+            title="Xóa ghi âm"
+          >
+            <Trash2 size={12} className="text-gray-400" />
+          </button>
+        </>
+      )}
+    </div>
+  );
+};
 
 const VerbTable = ({ core }: { core: string }) => {
   const forms = verbDict[core];
@@ -37,22 +188,19 @@ interface VerbCardProps {
   verb: Verb;
   category: Category;
   onSeen: (id: string) => void;
+  recorder: ReturnType<typeof useRecorder>;
 }
 
-const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
+const VerbCard = ({ verb, category, onSeen, recorder }: VerbCardProps) => {
   const [isFlipped, setIsFlipped] = useState(false);
-
-  const playAudio = (type: keyof Verb['audio'], e: React.MouseEvent) => {
-    e.stopPropagation();
-    const url = `${AUDIO_BASE_URL}${category.meta.folder}/${verb.audio[type]}`;
-    const audio = new Audio(url);
-    audio.play();
-  };
 
   const handleFlip = () => {
     setIsFlipped(!isFlipped);
     onSeen(`${category.meta.id}-${verb.id}`);
   };
+
+  const getModelUrl = (type: keyof Verb['audio']) => 
+    `${AUDIO_BASE_URL}${category.meta.folder}/${verb.audio[type]}`;
 
   return (
     <motion.div
@@ -77,13 +225,11 @@ const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
                 <span className="px-3 py-1 rounded-full text-white text-xs font-bold" style={{ backgroundColor: category.meta.color }}>
                   {verb.emoji} {verb.vi}
                 </span>
-                <button 
-                  onClick={(e) => playAudio('q', e)} 
-                  className="p-2 bg-navy/5 hover:bg-navy/10 rounded-full transition-colors group/play"
-                  title="Nghe câu hỏi"
-                >
-                  <Play size={16} className="text-navy group-hover/play:scale-110 transition-transform" />
-                </button>
+                <AudioControls 
+                  id={`${category.meta.id}-${verb.id}-q`}
+                  modelUrl={getModelUrl('q')}
+                  recorder={recorder}
+                />
               </div>
               <h3 className="font-display text-lg text-navy leading-tight mb-4">
                 When did you last <span className="font-bold underline decoration-2" style={{ textDecorationColor: category.meta.color }}>{verb.phrase}</span>?
@@ -103,9 +249,11 @@ const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
             >
               <div className="flex items-center justify-between mb-1">
                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-soft">Câu trả lời mẫu</span>
-                 <button onClick={(e) => playAudio('q', e)} className="p-1 hover:bg-navy/5 rounded-full transition-colors">
-                    <Play size={14} className="text-navy" />
-                 </button>
+                 <AudioControls 
+                  id={`${category.meta.id}-${verb.id}-q-back`}
+                  modelUrl={getModelUrl('q')}
+                  recorder={recorder}
+                />
               </div>
 
               <div className="space-y-2">
@@ -116,9 +264,12 @@ const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
                       <p className="text-xs text-navy leading-relaxed">{verb.scripts.yes}</p>
                       <p className="text-[10px] text-gray-soft italic">{verb.vi_scripts.yes}</p>
                     </div>
-                    <button onClick={(e) => playAudio('yes', e)} className="p-1 hover:bg-emerald-100 rounded-full">
-                      <Play size={12} className="text-emerald-600" />
-                    </button>
+                    <AudioControls 
+                      id={`${category.meta.id}-${verb.id}-yes`}
+                      modelUrl={getModelUrl('yes')}
+                      recorder={recorder}
+                      color="#059669"
+                    />
                   </div>
                 </div>
 
@@ -129,9 +280,12 @@ const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
                       <p className="text-xs text-navy leading-relaxed">{verb.scripts.no}</p>
                       <p className="text-[10px] text-gray-soft italic">{verb.vi_scripts.no}</p>
                     </div>
-                    <button onClick={(e) => playAudio('no', e)} className="p-1 hover:bg-rose-100 rounded-full">
-                      <Play size={12} className="text-rose-600" />
-                    </button>
+                    <AudioControls 
+                      id={`${category.meta.id}-${verb.id}-no`}
+                      modelUrl={getModelUrl('no')}
+                      recorder={recorder}
+                      color="#e11d48"
+                    />
                   </div>
                 </div>
 
@@ -142,9 +296,12 @@ const VerbCard = ({ verb, category, onSeen }: VerbCardProps) => {
                       <p className="text-xs text-navy leading-relaxed">{verb.scripts.follow}</p>
                       <p className="text-[10px] text-gray-soft italic">{verb.vi_scripts.follow}</p>
                     </div>
-                    <button onClick={(e) => playAudio('follow', e)} className="p-1 hover:bg-sky-100 rounded-full">
-                      <Play size={12} className="text-sky-600" />
-                    </button>
+                    <AudioControls 
+                      id={`${category.meta.id}-${verb.id}-follow`}
+                      modelUrl={getModelUrl('follow')}
+                      recorder={recorder}
+                      color="#0284c7"
+                    />
                   </div>
                 </div>
               </div>
@@ -163,6 +320,8 @@ export default function App() {
   const [seenVerbs, setSeenVerbs] = useState<Set<string>>(new Set());
   const [randomVerb, setRandomVerb] = useState<{ verb: Verb; category: Category } | null>(null);
   const [showRandomAnswer, setShowRandomAnswer] = useState(false);
+  
+  const recorder = useRecorder();
 
   const allVerbs = useMemo(() => {
     return categories.flatMap(cat => cat.verbs.map(v => ({ verb: v, category: cat })));
@@ -302,20 +461,18 @@ export default function App() {
             <div className="max-w-2xl mx-auto">
               <div className="bg-gradient-to-br from-navy to-[#2E4080] rounded-3xl p-8 text-center text-white shadow-xl relative overflow-hidden">
                 <div className="text-white/50 text-xs uppercase tracking-widest mb-2">Câu hỏi ngẫu nhiên</div>
-                <div className="flex items-center justify-center gap-4 mb-6">
+                <div className="flex flex-col items-center gap-4 mb-6">
                   <h2 className="font-display text-2xl md:text-3xl text-[#FDCB6E] leading-tight">
                     When did you last {randomVerb.verb.phrase}?
                   </h2>
-                  <button 
-                    onClick={() => {
-                      const url = `${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.q}`;
-                      new Audio(url).play();
-                    }} 
-                    className="p-3 bg-white/10 hover:bg-white/20 rounded-full transition-colors"
-                    title="Nghe câu hỏi"
-                  >
-                    <Play size={20} className="text-[#FDCB6E]" />
-                  </button>
+                  <div className="bg-white/10 p-2 rounded-2xl">
+                    <AudioControls 
+                      id={`random-${randomVerb.verb.id}-q`}
+                      modelUrl={`${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.q}`}
+                      recorder={recorder}
+                      color="#FDCB6E"
+                    />
+                  </div>
                 </div>
                 <div 
                   className="inline-block px-4 py-1 rounded-full text-xs font-bold mb-8"
@@ -350,10 +507,12 @@ export default function App() {
                       <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-sm">
                         <div className="flex justify-between items-center mb-2">
                           <span className="text-[#26de81] text-[10px] font-bold uppercase">✅ Trả lời CÓ</span>
-                          <button onClick={() => {
-                            const url = `${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.yes}`;
-                            new Audio(url).play();
-                          }} className="p-1 hover:bg-white/10 rounded-full"><Play size={14} /></button>
+                          <AudioControls 
+                            id={`random-${randomVerb.verb.id}-yes`}
+                            modelUrl={`${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.yes}`}
+                            recorder={recorder}
+                            color="#26de81"
+                          />
                         </div>
                         <p className="text-sm">{randomVerb.verb.scripts.yes}</p>
                         <p className="text-[10px] text-white/60 italic">{randomVerb.verb.vi_scripts.yes}</p>
@@ -362,10 +521,12 @@ export default function App() {
                       <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-sm">
                         <div className="flex justify-between items-center mb-2">
                           <span className="text-[#FF6B6B] text-[10px] font-bold uppercase">❌ Trả lời KHÔNG</span>
-                          <button onClick={() => {
-                            const url = `${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.no}`;
-                            new Audio(url).play();
-                          }} className="p-1 hover:bg-white/10 rounded-full"><Play size={14} /></button>
+                          <AudioControls 
+                            id={`random-${randomVerb.verb.id}-no`}
+                            modelUrl={`${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.no}`}
+                            recorder={recorder}
+                            color="#FF6B6B"
+                          />
                         </div>
                         <p className="text-sm">{randomVerb.verb.scripts.no}</p>
                         <p className="text-[10px] text-white/60 italic">{randomVerb.verb.vi_scripts.no}</p>
@@ -374,10 +535,12 @@ export default function App() {
                       <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-sm">
                         <div className="flex justify-between items-center mb-2">
                           <span className="text-[#4A90D9] text-[10px] font-bold uppercase">💬 Hỏi thêm</span>
-                          <button onClick={() => {
-                            const url = `${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.follow}`;
-                            new Audio(url).play();
-                          }} className="p-1 hover:bg-white/10 rounded-full"><Play size={14} /></button>
+                          <AudioControls 
+                            id={`random-${randomVerb.verb.id}-follow`}
+                            modelUrl={`${AUDIO_BASE_URL}${randomVerb.category.meta.folder}/${randomVerb.verb.audio.follow}`}
+                            recorder={recorder}
+                            color="#4A90D9"
+                          />
                         </div>
                         <p className="text-sm">{randomVerb.verb.scripts.follow}</p>
                         <p className="text-[10px] text-white/60 italic">{randomVerb.verb.vi_scripts.follow}</p>
@@ -414,6 +577,7 @@ export default function App() {
                       verb={v} 
                       category={cat} 
                       onSeen={handleSeen} 
+                      recorder={recorder}
                     />
                   ))}
                 </div>

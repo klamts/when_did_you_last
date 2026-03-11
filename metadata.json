@@ -1,5 +1,5 @@
 {
   "name": "When Did You Last...? Practice",
   "description": "An interactive English practice app for A2 level students focusing on past simple questions, verb forms (V1, V2, V3), and listening.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["microphone"]
 }
